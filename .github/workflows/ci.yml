@@ -1,0 +1,44 @@
+# The merge gate for slack-runtests.
+#
+# It runs the same command the README documents — `bash run.sh test` — rather
+# than a hand-written `uv run pytest`. If the documented entry point breaks,
+# the gate goes red, which is the point: a CI recipe that drifts from the
+# documented one tests something nobody actually runs.
+name: CI
+
+on:
+  # Unscoped on purpose. `branches: [main]` would silently exempt a PR stacked
+  # on another branch — the one most likely to need checking.
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Never cancel a run on `main`: its result is the record of what the trunk
+  # actually does.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # The job id is the status-check context that branch protection requires, so
+  # keep it stable: renaming this job silently un-gates the branch, because
+  # protection goes on requiring a context that no longer reports.
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # uv installs the interpreter too, reading .python-version, so the runner
+      # needs no system Python of any particular version.
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      # pytest exits 5 when it collects nothing, and run.sh execs it, so a
+      # suite that silently stopped matching any files fails here rather than
+      # passing over an empty set.
+      - name: Gate (60 unit tests)
+        run: bash run.sh test
