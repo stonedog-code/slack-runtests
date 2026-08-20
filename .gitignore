@@ -1,0 +1,14 @@
+__pycache__/
+*.py[oc]
+.venv
+.pytest_cache/
+.env
+results.xml
+
+# Per-platform venvs — the Mac uses .venv-macos over the share.
+.venv-*/
+
+# Agent instructions stay OUT of every repo under energy-solution: they are
+# workspace- and machine-specific context, not part of the product.
+CLAUDE.md
+.claude/

