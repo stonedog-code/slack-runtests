@@ -33,7 +33,10 @@ jobs:
 
       # uv installs the interpreter too, reading .python-version, so the runner
       # needs no system Python of any particular version.
-      - uses: astral-sh/setup-uv@v10
+      # Pinned to an exact release, not `@v10`: astral-sh/setup-uv stopped
+      # publishing moving major tags after v7, so `@v10` resolves to nothing
+      # and the job dies in "Set up job" before a single step runs.
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
 
