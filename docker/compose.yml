@@ -1,0 +1,112 @@
+# The three-test-server harness.
+#
+#     docker compose -f docker/compose.yml up --build
+#
+# WHAT THIS IS FOR, AND WHAT IT IS NOT
+#
+# It exists to prove the parts that cannot be proven in one process:
+#
+#   * three test servers share one queue and a job goes to EXACTLY ONE of them;
+#   * a test server enrols with a key, heartbeats, and is seen as online;
+#   * work reaches an internal machine that has NO PUBLISHED PORT — look at the
+#     runner services below: only `edge` has a `ports:` line. That absence is
+#     the security property, expressed as configuration.
+#
+# It does not prove Slack (no token here — the runners print what they would
+# have posted), TLS, or anything about the public internet. So this is the E2E
+# tier minus Slack, and calling it "end to end" without that qualifier would be
+# claiming a tier that does not exist.
+#
+# All three test servers are IDENTICAL on purpose — same image, same config,
+# different name. The only variable being tested is which one gets the job.
+
+name: slack-runtests
+
+services:
+  edge:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: ["uv", "run", "slack-runtests-edge"]
+    ports:
+      # The ONLY published port in this file.
+      - "8500:8500"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8500"
+      EDGE_DB_PATH: /app/data/edge.db
+      EDGE_KEY_PATH: /app/keys/edge_ed25519.pem
+      # A lab bootstrap token, so three fresh containers can enrol themselves
+      # without an operator copying keys in. Production pre-authorises keys
+      # instead — see edge/README.md.
+      RUNNER_ENROLL_TOKEN: "lab-enrolment-token-not-for-production"
+      EDGE_ADMIN_TOKEN: "lab-admin-token"
+      # Left unset deliberately: with no signing secret the edge accepts
+      # unverified Slack requests and warns on every one, which is what lets
+      # test.sh drive it. Set it to exercise the verified path.
+      SLACK_SIGNING_SECRET: "${SLACK_SIGNING_SECRET:-}"
+      RUNNER_HEARTBEAT_INTERVAL: "10"
+      RUNNER_OFFLINE_AFTER: "30"
+      LOG_LEVEL: INFO
+    volumes:
+      - edge-data:/app/data
+      - edge-keys:/app/keys
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8500/healthz')"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # ── three identical test servers ───────────────────────────────────────────
+  # No ports. No inbound anything. Each dials out to the edge and nothing else.
+  runner-1: &runner
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: ["uv", "run", "slack-runtests-runner"]
+    depends_on:
+      edge:
+        condition: service_healthy
+    environment: &runner-env
+      EDGE_URL: http://edge:8500
+      RUNNER_ID: runner-1
+      RUNNER_KEY_PATH: /app/keys/runner_ed25519.pem
+      RUNNER_ENROLL_TOKEN: "lab-enrolment-token-not-for-production"
+      # No labels: all three take any environment, which is the shared pool the
+      # queueing test needs. Set RUNNER_LABELS=staging to pin a box to one env.
+      RUNNER_LABELS: ""
+      RUNTESTS_SUITE_ROOT: tests/sample
+      RUNNER_WORKDIR: /app
+      RUNNER_HEARTBEAT_INTERVAL: "10"
+      # Unset: every Slack message is printed to this container's log instead.
+      SLACK_BOT_TOKEN: "${SLACK_BOT_TOKEN:-}"
+      SLACK_DEFAULT_CHANNEL: "#testing"
+      LOG_LEVEL: INFO
+    volumes:
+      - runner-1-keys:/app/keys
+
+  runner-2:
+    <<: *runner
+    environment:
+      <<: *runner-env
+      RUNNER_ID: runner-2
+    volumes:
+      - runner-2-keys:/app/keys
+
+  runner-3:
+    <<: *runner
+    environment:
+      <<: *runner-env
+      RUNNER_ID: runner-3
+    volumes:
+      - runner-3-keys:/app/keys
+
+volumes:
+  edge-data:
+  edge-keys:
+  # A volume per test server, because a shared one would mean three machines
+  # sharing a private key — which would defeat the entire point of giving each
+  # its own identity.
+  runner-1-keys:
+  runner-2-keys:
+  runner-3-keys:
