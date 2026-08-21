@@ -13,16 +13,14 @@ from __future__ import annotations
 
 import logging
 import time
-import urllib.parse
 import uuid
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from . import signature
+from . import gate
 from .config import Config, load
-from .parsing import SlackArgError, USAGE_HINT, parse
 from .runners import github as github_runner
 from .runners import local as local_runner
 
@@ -61,47 +59,34 @@ async def healthz() -> dict[str, str]:
 async def commands(request: Request, background: BackgroundTasks) -> JSONResponse:
     cfg = _config(request)
 
-    # 1. THE RAW BODY, before any form parsing — the signature is over the bytes
-    #    Slack sent. Re-encoding a parsed form and signing that gives a mismatch
-    #    for reasons invisible in a debugger.
+    # THE RAW BODY, before any form parsing — the signature is over the bytes
+    # Slack sent. Re-encoding a parsed form and signing that gives a mismatch
+    # for reasons invisible in a debugger.
     body = await request.body()
 
-    if cfg.verify_signatures:
-        if not signature.is_valid(
-            body,
-            request.headers.get("X-Slack-Request-Timestamp", ""),
-            request.headers.get("X-Slack-Signature", ""),
-            cfg.signing_secret,
-        ):
-            return JSONResponse({"error": "bad signature"}, status_code=401)
-    else:
-        # See Config.verify_signatures. Loud, every request, on purpose.
-        log.warning("SLACK_SIGNING_SECRET unset — request accepted UNVERIFIED")
+    # All four checks — signature, workspace, identity, wording — live in
+    # gate.py, shared with the edge server. One implementation of the boundary
+    # rather than two that drift apart, which is how one gets fixed and the
+    # other quietly does not.
+    outcome = gate.check(
+        body,
+        request.headers,
+        signing_secret=cfg.signing_secret,
+        allowed_team=cfg.allowed_team,
+        allowed_channels=cfg.allowed_channels,
+        allowed_users=cfg.allowed_users,
+    )
+    if not outcome.ok:
+        if outcome.status != 200:
+            return JSONResponse({"error": outcome.message}, status_code=outcome.status)
+        # A rejected command is a 200 with an ephemeral body: that is Slack's
+        # contract for a user error, and answering 4xx here would make Slack
+        # show its own generic failure instead of the reason.
+        return ephemeral(str(outcome.message))
 
-    # Parse the SAME bytes that were signed, rather than calling
-    # `request.form()`. Two reasons, and the second is the important one:
-    #
-    #   * it drops the `python-multipart` dependency — a slash command is always
-    #     application/x-www-form-urlencoded, never multipart;
-    #   * it guarantees the fields we authorise on are the fields that were
-    #     signed. Verifying a signature over the raw body and then reading a
-    #     separately-parsed copy is a small gap, and gaps like that are where
-    #     request-smuggling bugs live.
-    form = dict(urllib.parse.parse_qsl(body.decode("utf-8", errors="replace")))
-
-    # 2. Authorisation. Three separate checks; see config.py for why each.
-    if cfg.allowed_team and form.get("team_id") != cfg.allowed_team:
-        return ephemeral("This command is not available in this workspace.")
-    if cfg.allowed_channels and form.get("channel_id") not in cfg.allowed_channels:
-        return ephemeral("This command is not enabled in this channel.")
-    if cfg.allowed_users and form.get("user_id") not in cfg.allowed_users:
-        return ephemeral("You are not on the test-automation allowlist.")
-
-    # 3. Validation.
-    try:
-        args = parse(str(form.get("text", "")))
-    except SlackArgError as error:
-        return ephemeral(f"`/runtests`: {error}\n{USAGE_HINT}")
+    form = outcome.form
+    args = outcome.args
+    assert args is not None  # ok=True guarantees it; this narrows for the type checker
 
     # 4. Idempotency. Slack retries anything slow or non-2xx (X-Slack-Retry-Num),
     #    so key on trigger_id — unique per invocation — and make a repeat a

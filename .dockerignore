@@ -1,0 +1,15 @@
+# Build context hygiene. The Dockerfile copies named directories rather than
+# `COPY . .`, so most of this is belt and braces — but a stray .venv in the
+# context still costs seconds on every build.
+.venv
+.venv-*/
+.git
+.pytest_cache
+__pycache__/
+*.py[oc]
+.env
+results*.xml
+keys/
+data/
+trusted_runners/
+docker/

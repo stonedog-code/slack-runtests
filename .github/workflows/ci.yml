@@ -43,5 +43,13 @@ jobs:
       # pytest exits 5 when it collects nothing, and run.sh execs it, so a
       # suite that silently stopped matching any files fails here rather than
       # passing over an empty set.
-      - name: Gate (60 unit tests)
+      - name: Unit tier
         run: bash run.sh test
+
+      # The integration tier spawns a real uvicorn process on an ephemeral port
+      # and speaks HTTP to it. It runs here rather than only on a laptop
+      # because a tier that gates nothing is documentation, not a gate — and
+      # this is the tier that would catch a change breaking the deployed
+      # process while every in-process test still passed.
+      - name: Integration tier (spawns a real edge server)
+        run: bash run.sh test:integration

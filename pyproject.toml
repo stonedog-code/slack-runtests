@@ -9,17 +9,22 @@ dependencies = [
     "fastapi>=0.141.1",
     "uvicorn>=0.52.4",
     "httpx>=0.28.0",
+    "cryptography>=50.0.0",
 ]
 
 [project.scripts]
 slack-runtests = "slack_runtests.__main__:main"
+# The two deployables. Each lives in its own top-level folder with its own
+# README; they share this one project so there is one lockfile and one gate.
+slack-runtests-edge = "edge_server.__main__:main"
+slack-runtests-runner = "test_server.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/slack_runtests"]
+packages = ["src/slack_runtests", "edge/edge_server", "test-server/test_server"]
 
 [dependency-groups]
 dev = [
@@ -32,7 +37,12 @@ dev = [
 # the server executes on demand, not part of this project's own gate. Running it
 # here would conflate "the prototype works" with "the demo suite passes".
 testpaths = ["tests/unit"]
+# `edge/` and `test-server/` hold application code, not tests. Naming them here
+# stops a bare `pytest` from walking into them looking for suites — and stops a
+# directory called `test-server` from ever being mistaken for one.
+norecursedirs = ["edge", "test-server", "docker", ".venv*", "tests/sample"]
 markers = [
     "unit: fast, no I/O",
     "smoke: the sample suite the Slack command runs",
+    "integration: talks to a real server over a real socket",
 ]

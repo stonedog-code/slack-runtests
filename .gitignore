@@ -12,3 +12,10 @@ results.xml
 # workspace- and machine-specific context, not part of the product.
 CLAUDE.md
 .claude/
+
+# V3 runtime state. Private keys and the job database are per-machine and must
+# never be committed — a shared private key is not a private key.
+keys/
+data/
+trusted_runners/
+*.pem

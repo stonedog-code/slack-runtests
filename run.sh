@@ -3,7 +3,11 @@
 #
 #     bash run.sh                    # serve on :8500 (V1, local mode)
 #     bash run.sh serve              # same
-#     bash run.sh test               # this project's own 60-test unit suite
+#     bash run.sh edge               # V3: the edge server on :8500
+#     bash run.sh runner             # V3: a test server, dialling out to the edge
+#     bash run.sh test               # this project's own unit suite
+#     bash run.sh test:integration   # the integration tier (starts an edge itself)
+#     bash run.sh docker             # edge + three test servers, in containers
 #
 # Environment passes through, so the V2 mode still works the documented way:
 #
@@ -37,11 +41,28 @@ case "$cmd" in
     printf 'serving from %s — mode=%s\n' "$UV_PROJECT_ENVIRONMENT" "${RUNTESTS_MODE:-local}"
     exec uv run slack-runtests "$@"
     ;;
+  edge)
+    printf 'edge server — slack=%s\n' "${SLACK_SIGNING_SECRET:+configured}${SLACK_SIGNING_SECRET:-UNVERIFIED}"
+    exec uv run slack-runtests-edge "$@"
+    ;;
+  runner)
+    printf 'test server %s -> %s\n' "${RUNNER_ID:-$(hostname)}" "${EDGE_URL:-http://127.0.0.1:8500}"
+    exec uv run slack-runtests-runner "$@"
+    ;;
   test)
     exec uv run pytest "$@"
     ;;
+  test:integration)
+    # A separate path because these spawn a real uvicorn process and talk to it
+    # over a real socket. They are excluded from `testpaths` so the fast unit
+    # gate stays fast and stays honest about what it covers.
+    exec uv run pytest tests/integration "$@"
+    ;;
+  docker)
+    exec docker compose -f docker/compose.yml "${@:-up}" 
+    ;;
   *)
-    printf 'usage: %s [serve|test] [args...]\n' "$0" >&2
+    printf 'usage: %s [serve|edge|runner|test|test:integration|docker] [args...]\n' "$0" >&2
     exit 2
     ;;
 esac
