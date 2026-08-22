@@ -46,10 +46,15 @@ jobs:
       - name: Unit tier
         run: bash run.sh test
 
-      # The integration tier spawns a real uvicorn process on an ephemeral port
-      # and speaks HTTP to it. It runs here rather than only on a laptop
-      # because a tier that gates nothing is documentation, not a gate — and
-      # this is the tier that would catch a change breaking the deployed
-      # process while every in-process test still passed.
-      - name: Integration tier (spawns a real edge server)
+      # The integration tier crosses two process boundaries the unit tier
+      # cannot: a real uvicorn edge on an ephemeral port, spoken to over HTTP,
+      # and a real pytest spawned by the V1 runner whose scraped counts are
+      # compared to a fixture suite with a known outcome. It runs here rather
+      # than only on a laptop because a tier that gates nothing is
+      # documentation, not a gate — and these are the failures that leave every
+      # in-process test green.
+      #
+      # pytest reports the size of its input set on the last line ("N passed"),
+      # and exits 5 having collected nothing, so an empty run fails here.
+      - name: Integration tier (real edge server, real pytest subprocess)
         run: bash run.sh test:integration

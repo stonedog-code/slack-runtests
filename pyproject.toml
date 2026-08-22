@@ -40,7 +40,16 @@ testpaths = ["tests/unit"]
 # `edge/` and `test-server/` hold application code, not tests. Naming them here
 # stops a bare `pytest` from walking into them looking for suites — and stops a
 # directory called `test-server` from ever being mistaken for one.
-norecursedirs = ["edge", "test-server", "docker", ".venv*", "tests/sample"]
+#
+# `fixture_suite` is the suite the integration tier feeds to the V1 runner. One
+# of its tests FAILS ON PURPOSE, so it must never be collected by this project's
+# own gate: `pytest tests/integration` would otherwise pick it up and go red for
+# a reason that has nothing to do with the code under test. The runner still
+# reaches it, because it names the product directory INSIDE it and collection
+# therefore starts below the excluded name. Verified in both directions —
+# removing this entry makes `pytest tests/integration` collect 8 tests instead
+# of the tier's own.
+norecursedirs = ["edge", "test-server", "docker", ".venv*", "tests/sample", "fixture_suite"]
 markers = [
     "unit: fast, no I/O",
     "smoke: the sample suite the Slack command runs",

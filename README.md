@@ -170,13 +170,24 @@ slack-runtests/
 ├── .github/workflows/runtests.yml   # the action V2 dispatches
 └── tests/
     ├── unit/                        # this project's gate (136 tests)
-    ├── integration/                 # 3 tests against a REAL server process
+    ├── integration/                 # 12 tests against REAL processes
+    │   └── fixture_suite/webapp/    #   a suite with a KNOWN outcome, run for real
     └── sample/webapp/               # the demo suite the Slack command runs
 ```
 
 `tests/sample` is excluded from `testpaths` on purpose: it is the suite the
 server executes on demand, not part of this project's gate. Running it here
 would conflate "the prototype works" with "the demo suite passes".
+
+`tests/integration/fixture_suite` is excluded for a sharper reason: **one of its
+tests fails on purpose.** It exists so the V1 runner can be pointed at a suite
+whose outcome — 3 passed, 1 failed, 1 skipped — was decided in advance, which is
+the only way to check that the counts scraped out of pytest's stdout are the
+counts pytest actually produced. `norecursedirs` keeps this project's own gate
+out of it; the runner still reaches it by naming the product directory inside,
+so collection starts below the excluded name. Verified in both directions:
+removing the entry makes `pytest tests/integration` collect 8 tests rather than
+the tier's own.
 
 ## Security — the half that is most of it
 
@@ -234,7 +245,7 @@ Stated plainly rather than left to be discovered:
 
 ```bash
 bash run.sh test -q                # 136 passed  (unit)
-bash run.sh test:integration -q    #   3 passed  (integration, real server)
+bash run.sh test:integration -q    #  12 passed  (integration, real processes)
 ```
 
 Checked, not assumed:
@@ -253,6 +264,20 @@ Checked, not assumed:
   `prod` added to the allowlists (caught by the invalid-structure test), and a
   gate that never accepts (caught by the accepted test). Each failed exactly
   the intended test and nothing else; all three green again after restore.
+- **V1 count scraping, against a real pytest:** the runner is pointed at a
+  fixture suite of 3 passed / 1 failed / 1 skipped and the reported numbers are
+  compared to those. Non-vacuity, five plants, each restored: a typo in the
+  summary regex (reported `(3, 1, 0)` — **wrong, not absent**, which is the
+  whole risk); reading only the first line of pytest's output (reported zeros,
+  and **the unit tier stayed green at 136 passed** — the case no unit test can
+  see); returning 0 instead of pytest's exit code; a workspace id added to the
+  dispatch payload; and the runner door's Ed25519 check disabled.
+- **The dispatch payload, over real sockets:** a test server enrols through the
+  pre-authorised-key path, claims a job, and the payload is compared field by
+  field against the slash command that produced it — matched by the job id the
+  edge named in its reply, so it cannot pass against somebody else's job. It is
+  also checked for what it must *not* carry, and the edge's replies are verified
+  against the public key it publishes.
 - **The V3 harness, end to end:** `docker compose up`, three test servers
   enrolled with distinct Ed25519 keys and went online; five slash commands were
   distributed across all three with no job run twice; all five reported
@@ -273,10 +298,14 @@ channel. That is *E2E minus Slack*, and calling it end-to-end without the
 qualifier would be claiming a tier that does not exist. TLS and the public
 internet are likewise not covered.
 
-Also still missing: `runners/local.py` (V1) is covered only at the argv level,
-not by spawning a real subprocess; and the lease-expiry recovery path is proven
-by unit tests with a controlled clock rather than by killing a container
-mid-run.
+Also still missing: the lease-expiry recovery path is proven by unit tests with
+a controlled clock rather than by killing a container mid-run.
+
+**`runners/local.py` is no longer argv-only** — `tests/integration/
+test_local_runner.py` spawns a real pytest through it and checks the scraped
+counts against a fixture suite with a known outcome. What that does *not* cover
+is a pytest version whose summary format differs from the one installed here:
+the check is only as current as the lockfile.
 
 ## License
 

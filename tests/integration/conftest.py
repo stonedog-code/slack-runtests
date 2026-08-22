@@ -98,13 +98,17 @@ def edge(tmp_path_factory: pytest.TempPathFactory):
                 "RUNTESTS_EDGE_URL is set, so this suite cannot know how to sign a "
                 "request. Set SLACK_SIGNING_SECRET to the same value that server uses."
             )
-        # Not ours: use it, never terminate it.
+        # Not ours: use it, never terminate it. `trusted_keys_dir` stays None
+        # because we do not know where that server keeps its keys — the tests
+        # that need to enrol a test server skip rather than guess.
         yield EdgeUnderTest(url=external, signing_secret=secret, managed=False)
         return
 
     workdir: Path = tmp_path_factory.mktemp("edge")
     port = _free_port()
     url = f"http://127.0.0.1:{port}"
+
+    trusted_keys_dir = workdir / "trusted_runners"
 
     env = {
         **os.environ,
@@ -114,12 +118,21 @@ def edge(tmp_path_factory: pytest.TempPathFactory):
         "RUNTESTS_USERS": TEST_USER_ID,
         "EDGE_DB_PATH": str(workdir / "edge.db"),
         "EDGE_KEY_PATH": str(workdir / "edge_ed25519.pem"),
-        "EDGE_TRUSTED_KEYS_DIR": str(workdir / "trusted_runners"),
-        # No bootstrap token and no admin token: these tests are about the
-        # Slack door, and a test that quietly enables the lab enrolment path
-        # would be testing a configuration nobody deploys.
+        "EDGE_TRUSTED_KEYS_DIR": str(trusted_keys_dir),
+        # No bootstrap token and no admin token, deliberately. The runner-door
+        # tests enrol through the PRE-AUTHORISED key path — an operator drops a
+        # `.pub` file in `EDGE_TRUSTED_KEYS_DIR` — which is what production
+        # does. Enabling the lab bootstrap token here would test a
+        # configuration nobody deploys, and would hide a regression that made
+        # the token the only working route.
         "RUNNER_ENROLL_TOKEN": "",
         "EDGE_ADMIN_TOKEN": "",
+        # The claim endpoint is a LONG POLL: with nothing to hand out it holds
+        # the request open for `EDGE_POLL_TIMEOUT` seconds before answering 204.
+        # The 25s default is right for a deployment (under a proxy's idle
+        # timeout) and wrong for a suite, where "nothing left to dispatch" is an
+        # assertion we make on purpose and would otherwise pay 25s for.
+        "EDGE_POLL_TIMEOUT": "1",
         "LOG_LEVEL": "WARNING",
     }
     env.pop("SLACK_BOT_TOKEN", None)
@@ -138,7 +151,12 @@ def edge(tmp_path_factory: pytest.TempPathFactory):
 
     try:
         _wait_ready(url, process, time.monotonic() + READY_TIMEOUT)
-        yield EdgeUnderTest(url=url, signing_secret=TEST_SIGNING_SECRET, managed=True)
+        yield EdgeUnderTest(
+            url=url,
+            signing_secret=TEST_SIGNING_SECRET,
+            managed=True,
+            trusted_keys_dir=trusted_keys_dir,
+        )
     finally:
         if process.poll() is None:
             os.killpg(os.getpgid(process.pid), signal.SIGTERM)
