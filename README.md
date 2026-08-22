@@ -101,6 +101,25 @@ slack.finish(passed=48, failed=2, duration=91.4, run_url=...)
 **With no `SLACK_BOT_TOKEN` it sends nothing and prints what it would have sent,
 and to which channel.** The default channel is `#testing`.
 
+**The servers say so at startup too**, before any message exists:
+
+```
+WARNING  slack-runtests: SLACK_BOT_TOKEN unset — Slack is NOT configured.
+         Nothing will be sent to #testing; every message is printed to this
+         console instead, as '[slack:dry-run] <verb> -> <channel>'.
+```
+
+Per-message printing alone is not enough: that first line arrives whenever the
+first run happens, which may be hours after the process started and is exactly
+when nobody is watching. An operator needs to know the service is inert when
+they start it, not when it silently fails to report. A configured server says
+the opposite at `INFO`, so the line is informative in both directions rather
+than being a warning that is always present.
+
+The test server names no channel in that line — it is told its channel by each
+job, so it genuinely has none at startup, and printing the `#testing` default
+there would be a confident falsehood.
+
 That fallback is the design, not a debugging convenience — it is what makes the
 library safe to import unconditionally from a test suite. The alternatives are
 both worse: raising means every reporting test fails on a laptop, so people stop

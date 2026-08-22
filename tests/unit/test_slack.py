@@ -1,10 +1,17 @@
 """The library tests import. Its console fallback is the behaviour under test."""
 
 import io
+import logging
 
 import pytest
 
-from slack_runtests.slack import DEFAULT_CHANNEL, SlackNotifier, notify
+from slack_runtests.slack import (
+    DEFAULT_CHANNEL,
+    SlackNotifier,
+    announce_configuration,
+    configured,
+    notify,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -117,3 +124,62 @@ def test_notify_builds_a_fresh_notifier_each_call() -> None:
     # first — precisely the coupling that makes a suite order-dependent.
     assert notify("a", channel="#one").channel == "#one"
     assert notify("b").channel == "#testing"
+
+
+# ── the startup announcement ─────────────────────────────────────────────────
+#
+# Every message already prints itself when there is no token (above). What these
+# cover is the SECOND half of the same promise: saying so at startup, before any
+# message exists. An operator who starts the service needs to know it is inert
+# then, not hours later when the first run silently reports nowhere.
+
+
+def test_startup_warns_that_slack_is_not_configured(caplog: pytest.LogCaptureFixture) -> None:
+    log = logging.getLogger("test-startup")
+    with caplog.at_level(logging.INFO):
+        assert announce_configuration(log, "#ci") is False
+
+    message = caplog.text
+    assert "SLACK_BOT_TOKEN" in message        # WHICH knob is unset
+    assert "NOT configured" in message
+    assert "#ci" in message                    # WHERE it would have gone
+    assert "[slack:dry-run]" in message        # WHAT to search the console for
+    assert caplog.records[-1].levelno == logging.WARNING
+
+
+def test_startup_says_so_when_a_token_is_present(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The other direction. A warning that is emitted unconditionally tells an
+    # operator nothing, because it is present whether or not anything is wrong.
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-real-looking-token")
+    log = logging.getLogger("test-startup")
+    with caplog.at_level(logging.INFO):
+        assert announce_configuration(log, "#ci") is True
+
+    assert "SLACK_BOT_TOKEN unset" not in caplog.text
+    assert caplog.records[-1].levelno == logging.INFO
+    assert "#ci" in caplog.text
+
+
+def test_startup_does_not_invent_a_channel_it_does_not_know(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A test server learns its channel from each job, so it has none at startup.
+    # Printing the #testing default there would be a confident falsehood in the
+    # one line an operator is trusting to tell them what is going on.
+    log = logging.getLogger("test-startup")
+    with caplog.at_level(logging.INFO):
+        announce_configuration(log)
+
+    assert "#testing" not in caplog.text
+    assert "the channel each job names" in caplog.text
+
+
+def test_configured_tracks_the_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert configured() is False
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-abc")
+    assert configured() is True
+    # Read at call time, never cached at import — same guarantee as _token().
+    monkeypatch.delenv("SLACK_BOT_TOKEN")
+    assert configured() is False
