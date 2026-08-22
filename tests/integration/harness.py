@@ -7,13 +7,16 @@ file cannot do a relative import from a conftest — there is no package — and
 
 from __future__ import annotations
 
+import json
 import time
 import urllib.parse
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 
+from slack_runtests import identity
 from slack_runtests.signature import sign
 
 #: The "valid test Slack origin": real-looking identifiers that belong to
@@ -33,6 +36,11 @@ class EdgeUnderTest:
     signing_secret: str
     #: True when the fixture spawned the process and is responsible for it.
     managed: bool
+    #: Where the edge reads pre-authorised test-server keys from — the
+    #: production enrolment path, and the only one these tests use. `None` when
+    #: the edge is somebody else's process (RUNTESTS_EDGE_URL): we do not know
+    #: where its keys live and must not guess at a path on a running server.
+    trusted_keys_dir: Path | None = None
 
 
 def slack_body(text: str, **overrides: str) -> bytes:
@@ -75,3 +83,87 @@ def post(edge: EdgeUnderTest, body: bytes, *, secret: str | None = None,
         "X-Slack-Signature": sign(body, ts, secret if secret is not None else edge.signing_secret),
     }
     return httpx.post(f"{edge.url}/slack/commands", content=body, headers=headers, timeout=15)
+
+
+# ── the second door: a real test server, with a real Ed25519 identity ────────
+
+@dataclass
+class RunnerIdentity:
+    """A test server's key, and the headers that prove a request came from it.
+
+    The edge's runner door is not protected by Slack's HMAC — nothing about a
+    request from an internal machine is signed by Slack — so it has its own
+    lock: Ed25519 per test server, over method, path, timestamp and body. This
+    class is the client half of that, built from the same `identity` module the
+    real test server uses rather than from a test-only shortcut. A helper that
+    signed differently from production would pass while the deployed pair
+    disagreed.
+    """
+
+    runner_id: str
+    key: object  # Ed25519PrivateKey
+
+    @classmethod
+    def create(cls, runner_id: str) -> "RunnerIdentity":
+        return cls(runner_id=runner_id, key=identity.generate())
+
+    @property
+    def public_key(self) -> str:
+        return identity.public_b64(self.key)  # type: ignore[arg-type]
+
+    def headers(self, method: str, path: str, body: bytes) -> dict[str, str]:
+        ts = str(int(time.time()))
+        return {
+            "Content-Type": "application/json",
+            identity.HEADER_RUNNER_ID: self.runner_id,
+            identity.HEADER_TIMESTAMP: ts,
+            identity.HEADER_SIGNATURE: identity.sign(self.key, method, path, ts, body),  # type: ignore[arg-type]
+        }
+
+    def preauthorise(self, trusted_keys_dir: Path) -> None:
+        """Drop `<runner_id>.pub` where an operator would put it.
+
+        This is production enrolment: the edge accepts a new test server only
+        when its key is already on disk. The bootstrap token is the other path
+        and these tests deliberately leave it unset, so a regression that made
+        the token the only working route would fail here rather than pass.
+        """
+        trusted_keys_dir.mkdir(parents=True, exist_ok=True)
+        (trusted_keys_dir / f"{self.runner_id}.pub").write_text(self.public_key)
+
+    def post(self, edge: EdgeUnderTest, path: str, payload: dict | None = None,
+             *, key_override: object = None) -> httpx.Response:
+        """A signed POST to the runner door, over a real socket.
+
+        `key_override` signs with a different key while still presenting this
+        runner id — a forged request that is well-formed and unauthorised.
+        """
+        body = b"" if payload is None else json.dumps(payload).encode()
+        headers = self.headers("POST", path, body)
+        if key_override is not None:
+            signer = RunnerIdentity(runner_id=self.runner_id, key=key_override)
+            headers = signer.headers("POST", path, body)
+            headers[identity.HEADER_RUNNER_ID] = self.runner_id
+        return httpx.post(f"{edge.url}{path}", content=body, headers=headers, timeout=30)
+
+
+def edge_public_key(edge: EdgeUnderTest) -> str:
+    """The edge's own public key, fetched the way a test server fetches it."""
+    response = httpx.get(f"{edge.url}/edge/identity", timeout=15)
+    response.raise_for_status()
+    return str(response.json()["public_key"])
+
+
+def reply_is_signed_by_edge(response: httpx.Response, edge_key: str) -> bool:
+    """Verify the edge signed what it sent back.
+
+    Signing only one direction would leave a test server trusting whatever
+    answered its poll — and a test server is the thing that runs code and posts
+    to Slack, so "this job really came from the edge" is not a nicety.
+    """
+    return identity.verify_reply(
+        edge_key,
+        response.headers.get(identity.HEADER_EDGE_TIMESTAMP, ""),
+        response.headers.get(identity.HEADER_EDGE_SIGNATURE, ""),
+        response.content,
+    )
