@@ -91,6 +91,50 @@ def _normalise_channel(channel: str | None) -> str:
     return channel if channel.startswith("#") else f"#{channel}"
 
 
+def configured() -> bool:
+    """True when a bot token is present, so messages will really be sent.
+
+    The public name for what `SlackNotifier.enabled` answers per instance. A
+    caller that wants to say something at startup has no notifier yet, and
+    building a throwaway one just to read a boolean reads like a mistake.
+    """
+    return _token() is not None
+
+
+def announce_configuration(logger: logging.Logger, channel: str | None = None) -> bool:
+    """Say at STARTUP whether Slack is configured. Returns what it found.
+
+    Every message already prints itself when there is no token, but that first
+    line arrives whenever the first run happens — which may be hours after the
+    process started, and is exactly when nobody is watching the console. An
+    operator needs to know the service is inert at the moment they start it, not
+    at the moment it silently fails to report.
+
+    It names the console prefix and the destination too, so whoever reads the
+    startup line knows what to search for later.
+
+    One implementation, called by every component that posts, for the same
+    reason `gate.py` is shared: two copies of an operator-facing warning drift,
+    and the one that drifts is the one nobody reads again.
+    """
+    # `channel=None` is not the same as "the default channel". The test server
+    # learns its channel from each job, so at startup it genuinely does not know
+    # one — and naming #testing there would be a confident falsehood in the very
+    # line an operator is trusting to tell them what is going on.
+    where = f"to {_normalise_channel(channel)}" if channel else "to the channel each job names"
+
+    if configured():
+        logger.info("Slack configured — messages will be sent %s", where)
+        return True
+    logger.warning(
+        "SLACK_BOT_TOKEN unset — Slack is NOT configured. Nothing will be sent %s; "
+        "every message is printed to this console instead, as "
+        "'[slack:dry-run] <verb> -> <channel>' followed by the text.",
+        where,
+    )
+    return False
+
+
 @dataclass(slots=True)
 class SentMessage:
     """What a post produced.

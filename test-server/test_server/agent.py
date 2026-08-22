@@ -28,6 +28,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from slack_runtests import identity
+from slack_runtests.slack import announce_configuration
 from slack_runtests.parsing import EXPRESSION, PRODUCTS, SERVERS
 
 from .client import EdgeClient, EdgeError
@@ -243,8 +244,9 @@ def run_forever(cfg: RunnerConfig | None = None) -> int:
 
     client = EdgeClient(cfg.edge_url, cfg.runner_id, key, cfg.edge_fingerprint)
 
-    if not JobReporter("", cfg.runner_id).configured:
-        log.warning("SLACK_BOT_TOKEN unset — every Slack message will be printed to the console")
+    # No channel here on purpose: a test server is told its channel by each
+    # job, so it has none to name at startup.
+    announce_configuration(log)
 
     # Enrol, retrying with backoff. The edge restarting must not require anyone
     # to touch the test servers, so "cannot reach the edge" is a wait, not an
